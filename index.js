@@ -1,10 +1,20 @@
-// server/index.js
 const express = require("express");
 const bodyParser = require("body-parser");
 const webpush = require("web-push");
 const { randomUUID } = require("crypto");
 const cors = require("cors");
 const fetch = require("node-fetch"); // для запросов в FCM
+require('dotenv').config();
+
+// ====== Firebase Admin (для iOS/Android через FCM) ======
+const admin = require("firebase-admin");
+
+// Загружаем service account из env
+const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
 
 const app = express();
 app.use(cors());
@@ -12,8 +22,8 @@ app.use(bodyParser.json());
 
 // ====== VAPID (для Web Push) ======
 const vapidKeys = {
-  publicKey: "BHrOnyEmJzjJmYzfMFnllsDSKCoUfy_rd0xHBSqJscW-yHoB-0muU",
-  privateKey: "f7EFotIGh7WeUAY3XMAtv2DQl31szqUVPE",
+  publicKey: process.env.VAPID_PUBLIC_KEY,
+  privateKey: process.env.VAPID_PRIVATE_KEY,
 };
 
 webpush.setVapidDetails(
@@ -21,9 +31,6 @@ webpush.setVapidDetails(
   vapidKeys.publicKey,
   vapidKeys.privateKey
 );
-
-// ====== Firebase Server Key (для iOS/Android через FCM) ======
-const FCM_SERVER_KEY = "AIzaSyAXHQ-BDNborYHSKXSHwSExFXOb6yf2_Y8"; // ⚠️ вставь сюда свой ключ из Firebase
 
 // Хранилища
 const subscriptionsByUser = new Map(); // userToken → WebPush
@@ -81,19 +88,12 @@ app.post("/add-item", async (req, res) => {
     }
   }
 
-  // ====== FCM (iOS/Android) ======
-  for (let [userToken, token] of fcmTokensByUser) {
+  // ====== FCM (iOS/Android) через Firebase Admin SDK ======
+  for (let [userToken, fcmToken] of fcmTokensByUser) {
     try {
-      await fetch("https://fcm.googleapis.com/fcm/send", {
-        method: "POST",
-        headers: {
-          Authorization: `key=${FCM_SERVER_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          to: token,
-          notification: { title: payload.title, body: payload.body },
-        }),
+      await admin.messaging().send({
+        token: fcmToken,
+        notification: { title: payload.title, body: payload.body },
       });
     } catch (err) {
       console.error("FCM send error", err);
