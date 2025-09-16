@@ -1,87 +1,112 @@
 // server/index.js
-const express = require('express');
-const bodyParser = require('body-parser');
-const webpush = require('web-push');
-const { randomUUID } = require('crypto');
-const cors = require('cors');
+const express = require("express");
+const bodyParser = require("body-parser");
+const webpush = require("web-push");
+const { randomUUID } = require("crypto");
+const cors = require("cors");
+const fetch = require("node-fetch"); // для запросов в FCM
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// Вставь свои ключи VAPID
+// ====== VAPID (для Web Push) ======
 const vapidKeys = {
-  publicKey: 'BBbhbH5c8G4Xuma9EgaF3zK89dEi__WzF-3UGO3anMhtp4lqVWiwoyhXMLtkZ9BhaoQPRQuRIajXAlsgr4el0QM',
-  privateKey: 'rpRtMLZdjdlzugvtW-okgZmI_vaY8uL2LLrQ5M6Z6bc'
+  publicKey: "BHrOnyEmJzjJmYzfMFnllsDSKCoUfy_rd0xHBSqJscW-yHoB-0muU",
+  privateKey: "f7EFotIGh7WeUAY3XMAtv2DQl31szqUVPE",
 };
 
 webpush.setVapidDetails(
-  'mailto:you@example.com',
+  "mailto:you@example.com",
   vapidKeys.publicKey,
   vapidKeys.privateKey
 );
 
-// Хранилище подписок: userToken -> subscription
-const subscriptionsByUser = new Map();
+// ====== Firebase Server Key (для iOS/Android через FCM) ======
+const FCM_SERVER_KEY = "AIzaSyAXHQ-BDNborYHSKXSHwSExFXOb6yf2_Y8"; // ⚠️ вставь сюда свой ключ из Firebase
 
-// GET /vapidPublicKey
-app.get('/vapidPublicKey', (req, res) => {
+// Хранилища
+const subscriptionsByUser = new Map(); // userToken → WebPush
+const fcmTokensByUser = new Map();     // userToken → FCM token
+
+// ====== API ======
+
+// Получить VAPID ключ
+app.get("/vapidPublicKey", (req, res) => {
   res.json({ publicKey: vapidKeys.publicKey });
 });
 
-// POST /create-user
-app.post('/create-user', (req, res) => {
+// Новый пользователь
+app.post("/create-user", (req, res) => {
   const userToken = randomUUID();
   res.json({ userToken });
 });
 
-// POST /register-subscription
-app.post('/register-subscription', (req, res) => {
+// Web Push подписка
+app.post("/register-subscription", (req, res) => {
   const { userToken, subscription } = req.body;
-  if (!userToken || !subscription) return res.status(400).json({ error: 'userToken and subscription required' });
+  if (!userToken || !subscription)
+    return res.status(400).json({ error: "userToken and subscription required" });
   subscriptionsByUser.set(userToken, subscription);
   res.json({ ok: true });
 });
 
-// POST /add-item — отправка пушей и автоматическое удаление устаревших подписок
-app.post('/add-item', async (req, res) => {
+// FCM токен (iOS/Android)
+app.post("/register-fcm", (req, res) => {
+  const { userToken, fcmToken } = req.body;
+  if (!userToken || !fcmToken)
+    return res.status(400).json({ error: "userToken and fcmToken required" });
+  fcmTokensByUser.set(userToken, fcmToken);
+  res.json({ ok: true });
+});
+
+// Отправить пуш (WebPush + FCM)
+app.post("/add-item", async (req, res) => {
   const { message } = req.body;
-  if (!message) return res.status(400).json({ error: 'message required' });
+  if (!message) return res.status(400).json({ error: "message required" });
 
-  const payload = { title: 'New Item Added', body: message };
+  const payload = { title: "New Item Added", body: message };
 
+  // ====== Web Push ======
   for (let [userToken, subscription] of subscriptionsByUser) {
     try {
       await webpush.sendNotification(subscription, JSON.stringify(payload));
     } catch (err) {
       if (err.statusCode === 410 || err.statusCode === 404) {
-        // Подписка устарела или отписалась → удалить
-        console.log(`Subscription for user ${userToken} expired. Removing.`);
+        console.log(`Web subscription expired: ${userToken}`);
         subscriptionsByUser.delete(userToken);
       } else {
-        console.error('Push send error', err);
+        console.error("Push send error", err);
       }
+    }
+  }
+
+  // ====== FCM (iOS/Android) ======
+  for (let [userToken, token] of fcmTokensByUser) {
+    try {
+      await fetch("https://fcm.googleapis.com/fcm/send", {
+        method: "POST",
+        headers: {
+          Authorization: `key=${FCM_SERVER_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          to: token,
+          notification: { title: payload.title, body: payload.body },
+        }),
+      });
+    } catch (err) {
+      console.error("FCM send error", err);
     }
   }
 
   res.json({ ok: true });
 });
 
-// GET /test-user — проверить сервер
-app.get('/test-user', (req, res) => {
-  res.json({
-    status: 'ok',
-    message: 'Сервер работает! Попробуй POST /create-user для генерации userToken.'
-  });
+// Тест
+app.get("/test-user", (req, res) => {
+  res.json({ status: "ok", message: "Server is working!" });
 });
-// GET /list-subs — показать все userToken для отладки
-app.get('/list-subs', (req, res) => {
-    const arr = Array.from(subscriptionsByUser.keys());
-    res.json({ users: arr });
-  });
-  
 
-const PORT = 4000;
-const HOST = '0.0.0.0'; // слушать все интерфейсы локальной сети
-app.listen(PORT, HOST, () => console.log(`Push server running on ${HOST}:${PORT}`));
-
+const PORT = process.env.PORT || 4000;
+app.listen(PORT, () => console.log(`Push server running on :${PORT}`));
